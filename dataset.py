@@ -1,78 +1,122 @@
-from torch.utils import data
-from pycocotools.coco import COCO
-from torchvision import transforms as transforms
-import skimage.io as io
-import numpy as np
+import time
+import os, sys, re
 import torch
+import skimage.io as IO
+import matplotlib.pyplot as plt
 
-def transform(img):
-         t_ = transforms.Compose([
-                             transforms.ToPILImage(),
-                             transforms.ToTensor(),
-                              transforms.Normalize(mean=[0.485, 0.457, 0.407],
-                                                  std=[1,1,1])
-                             ]) 
-  
-         img = t_(img)
-         return img
+from torchvision import transforms as Transforms
+from torch.utils import data as Data
+from pycocotools.coco import COCO
 
+class CocoDataset(Data.Dataset):
+    """
+    Dataset interface to Object Detection and Segmentation Model
+    """
+    def __init__(self, stage , categories=['pizza'], coco_path = ""):
+        """
+        constructor of the dataset class
+        Args:
+            stage ([string]):  train | test. 
+            categories (list, optional): coco dataset categories to be loaded for training. Defaults to ['pizza'].
+            coco_path (str, optional): If the annotations json file is in different folder other than dataset/. Defaults to "".
+        """       
 
-class COCO_data(data.Dataset):
-    def __init__(self, stage, selected_classes):
-        if stage == "train":
-            self.interface = COCO("dataset/annotations/instances_train2017.json")
+        if stage == 'train':
+            self.coco = COCO(coco_path + "dataset/annotations/instances_train2017.json")
         else:
-            self.interface = COCO("dataset/annotations/instances_val2017.json")
+            self.coco = COCO(coco_path + "dataset/annotations/instances_val2017.json")
 
-        self.selected_category_ids = self.interface.getCatIds(catNms=selected_classes)
-        self.adjusted_category_ids = {}
-        self.image_nos = self.interface.getImgIds(catIds=self.selected_category_ids)
-        self.images = self.interface.loadImgs(self.image_nos)
-        self.all_categ_ids = self.interface.getCatIds()
-        self.all_categ_names = self.interface.loadCats(self.all_categ_ids)
-        self.all_categ_ids.insert(0,0)
-        background_category = {'id': 0, 'name': 'background', 'supercategory': 'N/A'}
-        self.all_categ_names.insert(0,background_category)
+        coco_all_cats_idx = self.coco.getCatIds()
+        coco_categories_names = self.coco.loadCats(coco_all_cats_idx)
 
-        for new_id, old_id in enumerate(self.all_categ_ids):
-            self.adjusted_category_ids[old_id] = new_id
-    
-    def load_X(self, idx):
-        image = np.array(io.imread(self.images[idx]["coco_url"]))
-        image = transform(image)
+        self.selected_cats_idx = self.coco.getCatIds(catNms=categories)
+        coco_images_idx = self.coco.getImgIds(catIds=self.selected_cats_idx)
+
+        self.dataset = self.coco.loadImgs(coco_images_idx)
+
+    @staticmethod
+    def transform(image):
+        """
+        Image processing method.
+        Args:
+            image ([image]): image to be processed
+        Returns:
+            [tensor]:  Processed image as tensor
+        """        
+        # normalization
+        t_ = Transforms.Compose([ Transforms.ToPILImage(),
+                                  Transforms.ToTensor(),
+                                #   Transforms.Normalize(
+                                #   mean=[0.485, 0.457, 0.407],
+                                #   std=[1,1,1])   
+                                ])
+        return t_(image)
+
+    def load_image(self, idx):
+        """
+        This method will bring image as skimage 
+        Args:
+            idx ([integer]): coco id of the selected image.
+        """
+        image = IO.imread(self.dataset[idx]['coco_url'])
+        if len(image.shape) == 3:
+            image = self.transform(image)
+        else:
+            image = "grayscale"
         return image
 
-    def load_y(self, idx):
-        image_ids = self.images[idx]["id"]
-        annotation_ids = self.interface.getAnnIds(imgIds=image_ids, catIds=self.selected_class_ids, iscrowd=None)
-        annotations = self.interface.loadAnns(annotation_ids)
-        boxes = []
-        category_ids = []
-        masks = []
-        for an in annotations:
-            new_id =  self.adjusted_category_ids[an["category_id"]]
-            category_ids.append(new_id)
-            # category_ids.append(an["category_id"])
-            box = an["bbox"]
-            #"bbox": [x,y,width,height],
-            box = [box[0], box[1], box[0]+box[2], box[1] + box[3]]
-            boxes.append(box)
-            mask = self.interface.annToMask(an)
-            masks.append(mask)
-        boxes = torch.as_tensor(boxes, dtype = torch.float)
-        ids = torch.tensor(ids, dtype=torch.int64)
-        masks = torch.tensor(masks, dtype=torch.uint8)
-        labels = {}
-        labels["boxes"] = boxes
-        labels['labels'] = category_ids
-        labels['masks'] = masks
-        return labels
+    def load_image_labels(self, idx):
+        """ This method gets the labels of the given image
+            It uses COCO api, get annotation of the image , then
+            it extracts categories , boxes and maskes and generate a dict. 
+            we use this dictionary , because training model requires targets in this format.
+
+        Args:
+            idx ([type]): [description]
+
+        Returns:
+            [type]: [description]
+        """
+        image_id = self.dataset[idx]['id']
+        annotation_ids = self.coco.getAnnIds(imgIds=image_id, 
+                         catIds=self.selected_cats_idx, iscrowd=None)
+        image_annotations = self.coco.loadAnns(annotation_ids)
+        image_categories = []
+        image_boxes = []
+        image_masks = []
+
+        for annotation in image_annotations:
+            image_categories.append(annotation['category_id'])
+            bbox = annotation['bbox']
+            # x, y, width, height => ( coordinates ) x, y, x + width , y + height
+            image_boxes.append([bbox[0],bbox[1],bbox[0]+bbox[2],bbox[1]+bbox[3]])
+            image_masks.append(self.coco.annToMask(annotation))
+
+        image_categories = torch.as_tensor(image_categories, dtype=torch.int64)
+        image_boxes = torch.as_tensor(image_boxes, dtype=torch.float32)
+        image_masks = torch.as_tensor(image_masks, dtype=torch.uint8)
+        image_labels = {}
+        image_labels['labels'] = image_categories
+        image_labels['boxes'] = image_boxes
+        image_labels['masks'] = image_masks
+        return image_labels
 
     def __len__(self):
-        return len(self.images)
+        """
+        Magic method that is called in Dataloader iterations. 
+        Returns:
+            [type]: [description]
+        """        
+        return len(self.dataset)
 
     def __getitem__(self, idx):
-        X = self.load_X(idx)
-        y = self.load_y(idx)
-        return X, y
-
+        """
+        Magic method that is called in Dataloader iterations. 
+        Args:
+            idx ([integer]): index of the image in the dataset
+        Returns:
+            [image, labels]: tensor, labels are python dict, keys are labels, boxes, masks
+        """        
+        image =  self.load_image(idx)
+        labels = self.load_image_labels(idx)
+        return image, labels

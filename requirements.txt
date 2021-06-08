@@ -1,0 +1,9 @@
+pycocotools==2.0.2
+torch==1.7.0
+torchvision==0.8.1
+scikit-image==0.17.2
+pandas
+numpy
+opencv-python==4.5.1.48
+tqdm
+seaborn
